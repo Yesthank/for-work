@@ -1,0 +1,156 @@
+Option Explicit
+
+' ==========================================================
+' [시스템 설정] 윈도우 API 선언 (운영체제 기능 직접 호출)
+' ==========================================================
+#If VBA7 Then
+    ' 키보드 감지
+    Private Declare PtrSafe Function GetAsyncKeyState Lib "user32" (ByVal vKey As Long) As Integer
+    Private Declare PtrSafe Sub Sleep Lib "kernel32" (ByVal dwMilliseconds As Long)
+    
+    ' 클립보드 제어
+    Private Declare PtrSafe Function OpenClipboard Lib "user32" (ByVal hwnd As LongPtr) As Long
+    Private Declare PtrSafe Function EmptyClipboard Lib "user32" () As Long
+    Private Declare PtrSafe Function CloseClipboard Lib "user32" () As Long
+    Private Declare PtrSafe Function SetClipboardData Lib "user32" (ByVal wFormat As Long, ByVal hMem As LongPtr) As LongPtr
+    Private Declare PtrSafe Function GlobalAlloc Lib "kernel32" (ByVal wFlags As Long, ByVal dwBytes As LongPtr) As LongPtr
+    Private Declare PtrSafe Function GlobalLock Lib "kernel32" (ByVal hMem As LongPtr) As LongPtr
+    Private Declare PtrSafe Function GlobalUnlock Lib "kernel32" (ByVal hMem As LongPtr) As Long
+    Private Declare PtrSafe Sub CopyMemory Lib "kernel32" Alias "RtlMoveMemory" (ByVal Destination As LongPtr, ByVal Source As LongPtr, ByVal Length As LongPtr)
+#Else
+    ' 32비트 호환용
+    Private Declare Function GetAsyncKeyState Lib "user32" (ByVal vKey As Long) As Integer
+    Private Declare Sub Sleep Lib "kernel32" (ByVal dwMilliseconds As Long)
+    
+    Private Declare Function OpenClipboard Lib "user32" (ByVal hwnd As Long) As Long
+    Private Declare Function EmptyClipboard Lib "user32" () As Long
+    Private Declare Function CloseClipboard Lib "user32" () As Long
+    Private Declare Function SetClipboardData Lib "user32" (ByVal wFormat As Long, ByVal hMem As Long) As Long
+    Private Declare Function GlobalAlloc Lib "kernel32" (ByVal wFlags As Long, ByVal dwBytes As Long) As Long
+    Private Declare Function GlobalLock Lib "kernel32" (ByVal hMem As Long) As Long
+    Private Declare Function GlobalUnlock Lib "kernel32" (ByVal hMem As Long) As Long
+    Private Declare Sub CopyMemory Lib "kernel32" Alias "RtlMoveMemory" (ByVal Destination As Long, ByVal Source As Long, ByVal Length As Long)
+#End If
+
+Const GMEM_MOVEABLE As Long = &H2
+Const CF_UNICODETEXT As Long = 13
+
+' ==========================================================
+' [메인 프로그램] 실행 로직
+' ==========================================================
+Sub StartSequentialCopy()
+    Dim ws As Worksheet
+    Dim lastRow As Long
+    Dim r As Long, c As Long
+    Dim dataList As Collection
+    Dim i As Long
+    Dim currentVal As String
+    Dim rawVal As Variant
+    
+    ' === [설정] ===
+    Set ws = ActiveSheet
+    Const START_ROW As Long = 1 ' 데이터가 시작되는 행 번호
+    ' =============
+    
+    ' 1. 데이터 읽기 및 [숫자 다듬기 작업]
+    Set dataList = New Collection
+    lastRow = ws.Cells(ws.Rows.Count, "B").End(xlUp).Row
+    
+    If lastRow < START_ROW Then
+        MsgBox "데이터가 없습니다. B열을 확인해주세요."
+        Exit Sub
+    End If
+    
+    For r = START_ROW To lastRow
+        For c = 2 To 7 ' B열(2) ~ G열(7)
+            rawVal = ws.Cells(r, c).Value
+            
+            ' 값이 숫자일 경우 반올림 규칙 적용
+            If IsNumeric(rawVal) And rawVal <> "" Then
+                ' E열 (5번째 열): 소수 6째 자리 반올림 -> 5째 자리까지 남김
+                If c = 5 Then
+                    currentVal = Format(rawVal, "0.#####")
+                ' 나머지 (B,C,D,F,G): 소수 4째 자리 반올림 -> 3째 자리까지 남김
+                Else
+                    currentVal = Format(rawVal, "0.###")
+                End If
+            Else
+                ' 문자는 그대로
+                currentVal = CStr(rawVal)
+            End If
+            
+            dataList.Add currentVal
+        Next c
+    Next r
+    
+    ' 2. 준비 완료 메시지
+    MsgBox "데이터 로드 완료! (총 " & dataList.Count & "개)" & vbCrLf & vbCrLf & _
+           "[왼쪽 Shift] : 다음 데이터 복사" & vbCrLf & _
+           "[오른쪽 Shift] : 이전 데이터로 되돌리기" & vbCrLf & _
+           "[ESC] : 프로그램 종료", vbInformation, "준비 끝"
+           
+    ' 3. 키보드 감시 시작 (무한 대기)
+    i = 1
+    Do
+        ' [ESC] 키를 누르면 종료
+        If GetAsyncKeyState(&H1B) <> 0 Then
+            MsgBox "프로그램을 종료합니다."
+            Application.StatusBar = False
+            Exit Sub
+        End If
+        
+        ' [왼쪽 Shift] 키를 누르면 (다음 복사) -> &HA0
+        If GetAsyncKeyState(&HA0) <> 0 Then
+            If i <= dataList.Count Then
+                currentVal = CStr(dataList(i))
+                
+                If PutInClipboard(currentVal) Then
+                    Application.StatusBar = "복사됨 (" & i & "/" & dataList.Count & ") ▶ " & currentVal
+                    i = i + 1
+                Else
+                    Application.StatusBar = "오류 발생! 다시 시도하세요."
+                End If
+                Sleep 300 ' 키 중복 입력 방지 (0.3초)
+            Else
+                MsgBox "모든 데이터 입력이 끝났습니다!"
+                Sleep 300
+            End If
+        End If
+        
+        ' [오른쪽 Shift] 키를 누르면 (되돌리기) -> &HA1
+        If GetAsyncKeyState(&HA1) <> 0 Then
+            If i > 1 Then
+                i = i - 1
+                currentVal = CStr(dataList(i - 1))
+                Call PutInClipboard(currentVal)
+                Application.StatusBar = "◀ 되돌림 (" & (i - 1) & "/" & dataList.Count & ") : " & currentVal
+                Sleep 300
+            End If
+        End If
+        
+        DoEvents ' 엑셀 멈춤 방지
+        Sleep 50
+    Loop
+End Sub
+
+' ==========================================================
+' [기능 함수] 클립보드 강제 주입 함수
+' ==========================================================
+Function PutInClipboard(ByVal sText As String) As Boolean
+    Dim hGlobal As LongPtr, lpString As LongPtr
+    Dim bSuccess As Boolean
+    bSuccess = False
+    
+    If OpenClipboard(0) Then
+        EmptyClipboard
+        hGlobal = GlobalAlloc(GMEM_MOVEABLE, LenB(sText) + 2)
+        If hGlobal <> 0 Then
+            lpString = GlobalLock(hGlobal)
+            CopyMemory lpString, StrPtr(sText), LenB(sText) + 2
+            GlobalUnlock hGlobal
+            If SetClipboardData(CF_UNICODETEXT, hGlobal) <> 0 Then bSuccess = True
+        End If
+        CloseClipboard
+    End If
+    PutInClipboard = bSuccess
+End Function
